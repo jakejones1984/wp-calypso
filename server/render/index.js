@@ -7,7 +7,7 @@ import React from 'react';
 import ReactDomServer from 'react-dom/server';
 import superagent from 'superagent';
 import Lru from 'lru';
-import { get, intersection, pick } from 'lodash';
+import { get, pick } from 'lodash';
 import debugFactory from 'debug';
 
 /**
@@ -123,20 +123,6 @@ export function render( element, key = JSON.stringify( element ), req ) {
 	//todo: render an error?
 }
 
-/**
- * Check a query object against an array of whitelisted keys.
- *
- * If any key in the query is not present in the whitelist, it is not cacheable.
- *
- * @param  {Object}        [query={}]                Query object
- * @param  {Array<string>} [whitelistedQueryKeys=[]] Whitelisted keys
- * @return {boolean}                                 True if all query keys are whitelisted
- */
-export function isCacheableQuery( query = {}, whitelistedQueryKeys = [] ) {
-	const queryKeys = Object.keys( query );
-	return queryKeys.length === intersection( queryKeys, whitelistedQueryKeys ).length;
-}
-
 export function serverRender( req, res ) {
 	const context = req.context;
 
@@ -145,26 +131,13 @@ export function serverRender( req, res ) {
 		links = [],
 		cacheKey = false;
 
-	if (
-		isSectionIsomorphic( context.store.getState() ) &&
-		! context.user &&
-		isCacheableQuery( context.query, context.cacheQueryKeys )
-	) {
-		cacheKey = getNormalizedPath( context.pathname, context.query );
-	}
-
 	if ( ! isDefaultLocale( context.lang ) ) {
 		const langFileName = getCurrentLocaleVariant( context.store.getState() ) || context.lang;
 		context.i18nLocaleScript = '//widgets.wp.com/languages/calypso/' + langFileName + '.js';
 	}
 
-	if (
-		config.isEnabled( 'server-side-rendering' ) &&
-		context.layout &&
-		! context.user &&
-		cacheKey &&
-		isDefaultLocale( context.lang )
-	) {
+	if ( shouldSSR( context ) ) {
+		cacheKey = getNormalizedPath( context.pathname, context.query );
 		context.renderedLayout = render(
 			context.layout,
 			req.error ? req.error.message : cacheKey,
@@ -225,4 +198,53 @@ export function serverRenderError( err, req, res, next ) {
 	}
 
 	next();
+}
+
+/**
+ * Middlewares may decide to override (or add, or remove) the validators defined as defaults.
+ *
+ * Adds SSRValidators to the context, an object in which property names are idnetifiers and the values are callables
+ * that shouls return booleans. If one of the validators fails, then SSR is considered disabled. All methdos would
+ * receive the context on call.
+ *
+ * @param {object}   context  The entire request context
+ * @param {function} next     As all middlewares, will just add next
+ */
+export function initShouldSSR( context, next ) {
+	context.SSRValidators = {
+		config: () => config.isEnabled( 'server-side-rendering' ),
+		section: () => isSectionIsomorphic( context.store.getState() ),
+		user: () => ! context.user, // logged out
+		locale: () => isDefaultLocale( context.lang ),
+		layout: () => context.layout,
+		query: () => Object.keys( context.query ).length === 0, // no query args
+	};
+
+	next();
+}
+
+/**
+ * Checks if SSR is usable for the current context.
+ *
+ * @see also initShouldSSR, but consider the fact that middlwares may override the defaults.
+ *
+ * @param {object}   context The currently built context
+ *
+ * @return {boolean} If all conditions in the context.SSRValidators hashmap are met
+ */
+function shouldSSR( context ) {
+	if ( ! context.SSRValidators ) {
+		// because the section is not isomorphic, the middleware initShouldSSR is not called)
+		return false;
+	}
+
+	for ( const validatorKey in context.SSRValidators ) {
+		const validatorFunction = context.SSRValidators[ validatorKey ];
+		if ( ! validatorFunction( context ) ) {
+			debug( 'SSR Disabled due to the callable check on ' + validatorKey );
+			return false;
+		}
+	}
+
+	return true;
 }

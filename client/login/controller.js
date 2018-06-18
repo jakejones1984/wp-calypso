@@ -6,7 +6,7 @@
 import page from 'page';
 import { parse } from 'qs';
 import React from 'react';
-import { includes } from 'lodash';
+import { includes, intersection } from 'lodash';
 import { parse as parseUrl } from 'url';
 
 /**
@@ -25,8 +25,6 @@ const enhanceContextWithLogin = context => {
 		params: { flow, isJetpack, socialService, twoFactorAuthType },
 		path,
 	} = context;
-
-	context.cacheQueryKeys = [ 'client_id', 'signup_flow' ];
 
 	context.primary = (
 		<WPLogin
@@ -157,5 +155,39 @@ export function redirectJetpack( context, next ) {
 	if ( isJetpack !== 'jetpack' && includes( redirect_to, 'jetpack/connect' ) ) {
 		return context.redirect( context.path.replace( 'log-in', 'log-in/jetpack' ) );
 	}
+	next();
+}
+
+export function setShouldSSRLogin( context, next ) {
+	if ( ! context.SSRValidators ) {
+		next(); // practically somehow the initSSRValidators was not initialized, so adding more is not necessary
+		return;
+	}
+
+	context.SSRValidators = Object.assign( context.SSRValidators, {
+		// Overrides the query validator, which by default would ask no parameters
+		query: () => {
+			const whitelistedQueryKeys = [ 'client_id', 'signup_flow', 'redirect_to' ];
+			const queryKeys = Object.keys( context.query );
+
+			// if there are any parameters, they must be ONLY the ones in the whitelist
+			return queryKeys.length === intersection( queryKeys, whitelistedQueryKeys ).length;
+		},
+
+		// When it exists, the redirect_to query parameter must satisfy a specific format
+		query__redirect_to: () => {
+			if ( ! context.query.redirect_to ) {
+				return true; // nothing to check
+			}
+
+			const redirectToDecoded = decodeURIComponent( context.query.redirect_to );
+			return (
+				redirectToDecoded.length < 120 &&
+				( redirectToDecoded.startsWith( 'https://wordpress.com/theme' ) ||
+					redirectToDecoded.startsWith( 'https://wordpress.com/go' ) )
+			);
+		},
+	} );
+
 	next();
 }
